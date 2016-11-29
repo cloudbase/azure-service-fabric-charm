@@ -1,5 +1,5 @@
 get-ad-user-credentials:
   description: |
     Returns the Active Directory credentials for both AD users requested
-    by the charm. The requested AD users are a normal domain user and a
-    domain admin user.
+    by the charm. There are two AD users requested by the charm (one is granted
+    with cluster administrative priviledges and the other one it is not).
