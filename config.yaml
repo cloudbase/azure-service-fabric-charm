@@ -23,10 +23,6 @@ options:
       Note that since a primary node runs a single copy of the system services,
       you would need a minimum of 3 primary nodes for Bronze, 5 for Silver,
       7 for Gold and 9 for Platinum reliability levels.
-  node-type-name:
-    type: string
-    default: JujuNodeType
-    description: "The name of the node type for this deployment"
   fault-domain-name:
     type: string
     default: JujuFD
