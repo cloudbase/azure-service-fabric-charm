@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="158px" height="158px" viewBox="0 0 158 158" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>Azure-Service-Fabric</title>
+    <desc>Created with Sketch.</desc>
+    <defs></defs>
+    <g id="Juju-Icons" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="Azure-Service-Fabric">
+            <g id="Base" fill="#E7E9ED">
+                <rect id="Rectangle" x="0" y="0" width="158" height="158"></rect>
+            </g>
+            <g id="Group" transform="translate(34.000000, 35.000000)">
+                <polygon id="Page-1" stroke="#18A1FF" stroke-width="5.6875" points="45.5 12.3010753 12.3229167 36.5166066 24.9956279 75.6989247 66.0043721 75.6989247 78.6770833 36.5166066"></polygon>
+                <ellipse id="Oval-2" fill="#263156" cx="45.5" cy="12.3010753" rx="12.3229167" ry="12.3010753"></ellipse>
+                <ellipse id="Oval-2-Copy-3" fill="#263156" cx="12.3229167" cy="36.9032258" rx="12.3229167" ry="12.3010753"></ellipse>
+                <ellipse id="Oval-2-Copy-4" fill="#263156" cx="24.6458333" cy="75.6989247" rx="12.3229167" ry="12.3010753"></ellipse>
+                <ellipse id="Oval-2-Copy" fill="#263156" cx="78.6770833" cy="36.9032258" rx="12.3229167" ry="12.3010753"></ellipse>
+                <ellipse id="Oval-2-Copy-2" fill="#263156" cx="66.3541667" cy="75.6989247" rx="12.3229167" ry="12.3010753"></ellipse>
+            </g>
+        </g>
+    </g>
+</svg>

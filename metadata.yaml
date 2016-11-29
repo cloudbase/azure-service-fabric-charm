@@ -1,0 +1,30 @@
+name: azure-service-fabric
+summary: Azure Service Fabric Charm
+maintainer: Ionut Balutoiu <ibalutoiu@cloudbasesolutions.com>
+description: |
+  Azure Service Fabric is a distributed systems platform that makes it easy to
+  package, deploy, and manage scalable and reliable microservices.
+tags:
+  - windows
+series:
+  - win2012r2
+  - win2016
+resources:
+  dotnet-installer:
+    type: file
+    filename: dotnet-framework.exe
+    description: .NET Framework 4.5.1 or higher x64 installer
+  asf-zip-package:
+    type: file
+    filename: azure-service-fabric-package.zip
+    description: Azure Service Fabric standalone zip package
+subordinate: false
+provides:
+  reverseproxy:
+    interface: http
+requires:
+  ad-join:
+    interface: ad-join
+peers:
+  peer:
+    interface: asf-peer

@@ -1,0 +1,121 @@
+options:
+  cluster-name:
+    type: string
+    default: JujuServiceFabric
+    description: "Friendly name of the Azure Service Fabric."
+  security-type:
+    type: string
+    default: Unsecure
+    description: |
+      The type of the cluster security. Supported types by the charm are:
+      - 'Unsecure', the cluster is not secured at all;
+      - 'Windows', for an Active Directory based security;
+      - 'X509', for a certificate-based security.
+  reliability-level:
+    type: string
+    default: Bronze
+    description: |
+      The reliability level defines the number of copies of the system
+      services that can run on the primary nodes of the cluster. This
+      increases the reliability of these services and hence the cluster.
+      You can set this variable to either Bronze, Silver, Gold or Platinum
+      for 3, 5, 7 or 9 copies of these services respectively.
+      Note that since a primary node runs a single copy of the system services,
+      you would need a minimum of 3 primary nodes for Bronze, 5 for Silver,
+      7 for Gold and 9 for Platinum reliability levels.
+  node-type-name:
+    type: string
+    default: JujuNodeType
+    description: "The name of the node type for this deployment"
+  fault-domain-name:
+    type: string
+    default: JujuFD
+    description: |
+      Represents the fault domain name used for these deployment units.
+      A fault domain (FD) is a physical unit of failure and is directly
+      related to the physical infrastructure in the data centers. A fault
+      domain consists of hardware components (computers, switches, networks,
+      and more) that share a single point of failure.
+  upgrade-domain-name:
+    type: string
+    default: JujuUD
+    description: |
+      An upgrade domain (UD) is a logical unit of nodes. During Service Fabric
+      orchestrated upgrades (either an application upgrade or a cluster
+      upgrade), all nodes in a UD are taken down to perform the upgrade
+      while nodes in other UDs remain available to serve requests.
+  client-connection-endpoint-port:
+    type: int
+    default: 19000
+    description: |
+      The port used by the client to connect to the cluster, when using
+      the client APIs.
+  cluster-connection-endpoint-port:
+    type: int
+    default: 19001
+    description: "The port at which the nodes communicate with each other."
+  lease-driver-endpoint-port:
+    type: int
+    default: 19002
+    description: |
+      The port used by the cluster lease driver to find out if the nodes
+      are still active.
+  service-connection-endpoint-port:
+    type: int
+    default: 19003
+    description: |
+      The port used by the applications and services deployed on a node, to
+      communicate with the Service Fabric client on that particular node.
+  http-gateway-endpoint-port:
+    type: int
+    default: 19080
+    description: |
+      The port used by the Service Fabric Explorer to connect to the cluster.
+  ephemeral-start-port:
+    type: int
+    default: 20606
+    description: |
+      This is used together with 'ephemeral-end-port'.
+      They override the dynamic ports used by the OS. Service Fabric will use
+      a part of these as application ports and the remaining will be available
+      for the OS.
+      You need to make sure that the difference between the start and the end
+      ports is at least 255. You may run into conflicts if this difference is
+      too low, since this range is shared with the operating system.
+  ephemeral-end-port:
+    type: int
+    default: 20861
+    description: |
+      This is used together with 'ephemeral-start-port'. They override the
+      dynamic ports used by the OS.
+  application-start-port:
+    type: int
+    default: 20575
+    description: |
+      Starting port that will be used by the Service Fabric applications.
+      Config option is used together with 'application-end-port'.
+      These should be a subset of the ephemeral ports, enough to cover the
+      endpoint requirement of your applications. Service Fabric will use these
+      whenever new ports are required, as well as take care of opening
+      the firewall for these ports.
+  application-end-port:
+    type: int
+    default: 20605
+    description: |
+      Ending port that will be used by the Service Fabric applications.
+      Config option is used together with 'application-start-port'.
+  change-hostname:
+    type: boolean
+    default: False
+    description: |
+      The hostname set inside the newly spawned machine is usually the same as
+      the name of the instance being spawned. In cases where the instance name
+      is larger then 15 characters (maximum size for windows NetBios names), the
+      instance name gets truncated to the first 15 characters. This creates a problem,
+      as hostnames in active directory, for example, are very important. Having more
+      then one machine with the same hostname try to join the same domain, will
+      create trust issues.
+      This option allows changing the hostname of the current running system to a
+      combination of the first 14 (or less, depending on how many digits the unit number has)
+      characters of the charm name and the unit number. While this is not infallible,
+      It does have less of a chance of creating hostname conflicts.
