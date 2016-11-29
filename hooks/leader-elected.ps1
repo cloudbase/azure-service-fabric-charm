@@ -21,7 +21,7 @@ Import-Module JujuLogging
 try {
     Import-Module ASFHooks
 
-    Invoke-WebsiteRelationJoinedHook
+    Invoke-PeerRelationChangedHook
 } catch {
     Write-HookTracebackToLog $_
     exit 1

@@ -791,7 +791,13 @@ function Add-WindowsUser {
         }
         $cmd = @("net.exe", "user", $Username)
         if (!$exists) {
-            $cmd += @($Password, "/add", ("/fullname:{0}" -f @($Fullname)), ("/comment:{0}" -f @($Description)), "/expires:never", "/active:yes")
+            $cmd += @($Password, "/add", "/expires:never", "/active:yes")
+            if($Fullname) {
+                $cmd += "/fullname:{0}" -f @($Fullname)
+            }
+            if($Description) {
+                $cmd += "/comment:{0}" -f @($Description)
+            }
         } else {
             $cmd += $Password
         }

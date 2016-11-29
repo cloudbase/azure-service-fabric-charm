@@ -18,16 +18,25 @@ Import-Module JujuUtils
 Import-Module JujuWindowsUtils
 Import-Module ADCharmUtils
 
-
 $ASF_HOME_DIR = Join-Path $env:SystemDrive "ServiceFabric"
 $ASF_PKG_DIR = Join-Path $ASF_HOME_DIR "Package"
-$CHARM_USER_FULL_NAME = "ASF Juju User"
-$CHARM_USER_DESCRIPTION = "Local administrator user used by the Juju charm to create and manage the Azure Service Fabric cluster"
+$ASF_RUNTIME_CAB_FILE_PATH = Join-Path $ASF_PKG_DIR "MicrosoftAzureServiceFabric.cab"
+$ASF_AD_USER_NAME = "asf-user"
+$ASF_AD_ADMIN_NAME = "asf-admin"
+$ASF_AD_GROUP_NAME = "asf-group"
+
+$WINDOWS_SECURITY_TYPE = 'Windows'
+$UNSECURE_SECURITY_TYPE = 'Unsecure'
+$CERTIFICATE_SECURITY_TYPE = 'x509'
+
+$LOCAL_USER_FULL_NAME = "ASF Juju User"
+$LOCAL_USER_DESCRIPTION = "Local administrator user used by the Juju charm"
 
 $DEFAULT_FABRIC_LOG_ROOT = Join-Path $ASF_HOME_DIR "Log"
 $DEFAULT_FABRIC_DATA_ROOT = Join-Path $ASF_HOME_DIR "FabricDataRoot"
 $DEFAULT_DIAGNOSTICS_STORE = Join-Path $ASF_HOME_DIR "DiagnosticsStore"
 
+$ADMINISTRATORS_GROUP_SID = "S-1-5-32-544"
 $COMPUTERNAME = [System.Net.Dns]::GetHostName()
 # Dictionary with the default config option values, which are used in case the
 # charm config options are empty.
@@ -57,7 +66,11 @@ $VALID_RELIABILITY_LEVELS = @{
     "Gold"     = 7
     "Platinum" = 9
 }
-$VALID_SECURITY_TYPES = @("Unsecure", "Windows", "x509")
+$VALID_SECURITY_TYPES = @(
+    $UNSECURE_SECURITY_TYPE,
+    $WINDOWS_SECURITY_TYPE,
+    $CERTIFICATE_SECURITY_TYPE
+)
 # Release codes for all the supported .NET frameworks (4.5.1 or higher)
 $SUPPORTED_NET_FRAMEWORK_RELEASES = @(
     378675, # .NET Framework 4.5.1 installed with Windows 8.1 or Windows Server 2012 R2
@@ -71,8 +84,22 @@ $SUPPORTED_NET_FRAMEWORK_RELEASES = @(
     394806  # .NET Framework 4.6.2 on all other OS versions
 )
 
+try {
+    # NOTE(ibalutoiu):
+    # If DeploymentComponents is not added in PATH, the Azure Service Provider
+    # PowerShell cmdlets complain because they can't find the 'FabricCommon.dll'
+    $env:PATH += ";$ASF_PKG_DIR\DeploymentComponents"
+    Import-Module "$ASF_PKG_DIR\DeploymentComponents\ServiceFabric.psd1"
+} catch {
+    Write-JujuWarning "Azure Service Fabric package is not yet installed."
+}
+
 
 function Get-CharmConfigContext {
+    if($Global:ASF_CHARM_CFG) {
+        return $Global:ASF_CHARM_CFG
+    }
+
     $cfgCtxt = @{}
     $cfg = Get-JujuCharmConfig
 
@@ -104,6 +131,10 @@ function Get-CharmConfigContext {
     if(!$validRange) {
         Throw "Application port range is not a valid range."
     }
+
+    # Cache this as read-only global variable for the current hook,
+    # in order to improve performance.
+    Set-Variable -Name "ASF_CHARM_CFG" -Value $cfgCtxt -Scope Global -Option ReadOnly
 
     return $cfgCtxt
 }
@@ -148,7 +179,7 @@ function Install-DotNetFramework {
                        -ArgumentList @('/q', '/norestart')
     if($p.ExitCode -ne 0) {
         if($p.ExitCode -eq 3010) {
-            # Installer finished successfully and a reboot is needed.
+            # 3010 -> Exit code that signals successful installation and a reboot is needed.
             return $true
         }
     }
@@ -169,6 +200,15 @@ function Install-AzureServiceFabricPackage {
 }
 
 function Get-PeerUnits {
+    <#
+    .SYNOPSIS
+    Returns a list of peers that are ready to be clustered.
+    #>
+
+    if($Global:PEER_UNITS) {
+        return $Global:PEER_UNITS
+    }
+
     $peerUnits = [System.Collections.Generic.List[Hashtable]](New-Object "System.Collections.Generic.List[Hashtable]")
 
     $rids = Get-JujuRelationIds -Relation 'peer'
@@ -187,10 +227,26 @@ function Get-PeerUnits {
         }
     }
 
+    # Include the current unit as well
+    $peerUnits.Add(@{
+        "node_name" = $COMPUTERNAME
+        "ip_address" = Get-JujuUnitPrivateIP
+    })
+
+    # Cache this as read-only global variable for the current hook, in order to
+    # improve performance.
+    Set-Variable -Name "PEER_UNITS" -Value $peerUnits -Scope Global -Option ReadOnly
+
     return $peerUnits
 }
 
 function Disable-RemoteUAC {
+    <#
+    .SYNOPSIS
+    Disable remote UAC filter, thus allowing remote users to access the
+    local administrative shares using local administrators credentials.
+    #>
+
     $registryNamespace = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
 
     $key = Get-ItemProperty -Path $registryNamespace
@@ -257,7 +313,7 @@ function Get-RandomUserName {
     return [string]::join("", $name)
 }
 
-function Get-ASFUserCredential {
+function Get-ASFLocalAdminCredential {
     $leaderData = Get-LeaderData
     if(!$leaderData['charm-user-name'] -or !$leaderData['charm-user-password']) {
         return $null
@@ -269,39 +325,46 @@ function Get-ASFUserCredential {
     return $creds
 }
 
-function Get-UnsecureMultiMachineJsonClusterConfig {
-    Param(
-        [Parameter(Mandatory=$true)]
-        [Hashtable[]]$PeerUnits
-    )
-
-    $cfgCtxt = Get-CharmConfigContext
-
-    $nodes = [System.Collections.Generic.List[Hashtable]](New-Object "System.Collections.Generic.List[Hashtable]")
-    foreach($unit in $PeerUnits) {
-        $nodes.Add(@{
-            "nodeName" = $unit['node_name']
-            "iPAddress" = $unit['ip_address']
-            "nodeTypeRef" = $cfgCtxt['node_type_name']
-            "faultDomain" = ("fd:/{0}" -f @($cfgCtxt['fault_domain_name']))
-            "upgradeDomain" = $cfgCtxt['upgrade_domain_name']
-        })
+function Get-ASFDomainAdminCredential {
+    $adCtxt = Get-ActiveDirectoryContext
+    if(!$adCtxt.Count -or !$adCtxt['adcredentials']) {
+        return $null
     }
-    $nodes.Add(@{
-        "nodeName" = $COMPUTERNAME
-        "iPAddress" = Get-JujuUnitPrivateIP
-        "nodeTypeRef" = $cfgCtxt['node_type_name']
-        "faultDomain" = ("fd:/{0}" -f @($cfgCtxt['fault_domain_name']))
-        "upgradeDomain" = $cfgCtxt['upgrade_domain_name']
-    })
+
+    $domainUser = "{0}\{1}" -f @($adCtxt['netbiosname'], $ASF_AD_ADMIN_NAME)
+    Grant-PrivilegesOnDomainUser -Username $domainUser
+    $creds = $adCtxt['adcredentials'] | Where-Object { $_.username -eq $domainUser }
+
+    return $creds['pscredentials']
+}
+
+function Get-ASFCredential {
+    $cfgCtxt = Get-CharmConfigContext
+    $adCtxt = Get-ActiveDirectoryContext
+    $domainJoined = Start-JoinDomain
+    if(($cfgCtxt['security_type'] -eq $WINDOWS_SECURITY_TYPE) -and (!$domainJoined -or !$adCtxt['adcredentials'])) {
+        # When cluster security type is set to Windows, ad-join relation is mandatory.
+        Write-JujuWarning "Cluster security type is set to Windows. AD context is not ready yet"
+        Set-JujuStatus -Status 'blocked' -Message 'Incomplete relation: ad-join'
+        return $null
+    }
+
+    if($adCtxt['adcredentials']) {
+        return (Get-ASFDomainAdminCredential)
+    }
+
+    return (Get-ASFLocalAdminCredential)
+}
+
+function Get-ASFBaseClusterConfig {
+    $cfgCtxt = Get-CharmConfigContext
 
     return @{
         "name" = $cfgCtxt['cluster_name']
         "clusterConfigurationVersion" = "1.0.0"
         "apiVersion" = "2015-01-01-alpha"
-        "nodes" = $nodes
         "properties" = @{
-            "reliabilityLevel" = "Bronze"
+            "reliabilityLevel" = $cfgCtxt['reliability_level']
             "diagnosticsStore" = @{
                 "metadata" = "Local diagnostics store"
                 "dataDeletionAgeInDays" = 7
@@ -347,19 +410,70 @@ function Get-UnsecureMultiMachineJsonClusterConfig {
     }
 }
 
-# TODO(ibalutoiu): Add support for other cluster configurations later on.
-#                  Only unsecured is supported at the moment.
-function Get-ASFJsonClusterConfig {
+# TODO(ibalutoiu): Add support for 'x509' certficates-based security type as well.
+function Get-ASFClusterConfig {
     Param(
         [ValidateSet("Unsecure", "Windows", "x509")]
-        [String]$ClusterSecurityType,
-        [Parameter(Mandatory=$true)]
-        [Hashtable[]]$PeerUnits
+        [String]$ClusterSecurityType
     )
+
+    $clusterConfig = Get-ASFBaseClusterConfig
+    $peerUnits = Get-PeerUnits
+    $nodes = [System.Collections.Generic.List[Hashtable]](New-Object "System.Collections.Generic.List[Hashtable]")
 
     switch($ClusterSecurityType) {
         "Unsecure" {
-            return (Get-UnsecureMultiMachineJsonClusterConfig -PeerUnits $PeerUnits)
+            foreach($unit in $peerUnits) {
+                $nodes.Add(@{
+                    "nodeName" = $unit['node_name']
+                    "iPAddress" = $unit['ip_address']
+                    "nodeTypeRef" = $cfgCtxt['node_type_name']
+                    "faultDomain" = ("fd:/{0}" -f @($cfgCtxt['fault_domain_name']))
+                    "upgradeDomain" = $cfgCtxt['upgrade_domain_name']
+                })
+            }
+            $clusterConfig['nodes'] = $nodes
+
+            return $clusterConfig
+        }
+        "Windows" {
+            $adCtxt = Get-ActiveDirectoryContext
+
+            $adGroup = "{0}\{1}" -f @($adCtxt['domainName'], $ASF_AD_GROUP_NAME)
+            $adUser = "{0}\{1}" -f @($adCtxt['domainName'], $ASF_AD_USER_NAME)
+            $adAdmin = "{0}\{1}" -f @($adCtxt['domainName'], $ASF_AD_ADMIN_NAME)
+
+            $clusterConfig['properties']['security'] = @{
+                "ClusterCredentialType" = "Windows"
+                "ServerCredentialType" = "Windows"
+                "WindowsIdentities" = @{
+                    "ClusterIdentity" = $adGroup
+                    "ClientIdentities" = @(
+                        @{
+                            "Identity" = $adUser
+                            "IsAdmin" = $false
+                        },
+                        @{
+                            "Identity" = $adAdmin
+                            "IsAdmin" = $true
+                        }
+                    )
+                }
+            }
+
+            foreach($unit in $peerUnits) {
+                $nodeFQDN = "{0}.{1}" -f @($unit['node_name'], $adCtxt['domainName'])
+                $nodes.Add(@{
+                    "nodeName" = $unit['node_name']
+                    "iPAddress" = $nodeFQDN
+                    "nodeTypeRef" = $cfgCtxt['node_type_name']
+                    "faultDomain" = ("fd:/{0}" -f @($cfgCtxt['fault_domain_name']))
+                    "upgradeDomain" = $cfgCtxt['upgrade_domain_name']
+                })
+            }
+            $clusterConfig['nodes'] = $nodes
+
+            return $clusterConfig
         }
         default {
             Throw "$ClusterSecurityType cluster security type is not supported yet."
@@ -367,127 +481,204 @@ function Get-ASFJsonClusterConfig {
     }
 }
 
-function Get-IsASFClusterInstalled {
+function Set-ASFClusterNodesAddresses {
+    <#
+    .SYNOPSIS
+     Sets a leader variable with the list of the nodes addresses that
+     successfully joined the cluster. This variable is used to check if the
+     cluster is initialized, but also when trying to create a cluster connection.
+     A cluster request can be addressed to any of the cluster nodes IP on
+     the API port.
+    #>
+
+    $params = @{
+        'ErrorAction' = 'Stop'
+    }
+    $cfgCtxt = Get-CharmConfigContext
+    if($cfgCtxt['security_type'] -eq $WINDOWS_SECURITY_TYPE) {
+        $params['WindowsCredential'] = $true
+    }
+    $params['ConnectionEndpoint'] = "{0}:{1}" -f @((Get-JujuUnitPrivateIP), $cfgCtxt['client_connection_endpoint_port'])
+
+    Write-JujuWarning "Trying to establish connection to cluster node address: $address"
+    Connect-ServiceFabricCluster @params | Out-Null
+
+    $clusterNodes = Get-ServiceFabricNode -ErrorAction Stop
+    Set-LeaderData -Settings @{
+        'cluster-nodes-addresses' = ($clusterNodes.IpAddressOrFQDN -join ' ')
+    }
+}
+
+function Get-ASFClusterNodesAddresses {
     # NOTE(ibalutoiu): The following leader variable is set only after
     #                  the ASF cluster was successfully initialized.
-    return (Get-LeaderData -Attribute 'cluster-installed')
-}
-
-function Get-PeerContext {
-    $required = @{
-        "private-address" = $null
+    #                  It represents a list of nodes addresses that are part
+    #                  of the Azure Service Fabric cluster.
+    $clusterNodesAddresses = Get-LeaderData -Attribute 'cluster-nodes-addresses'
+    if($clusterNodesAddresses) {
+        $nodesAddresses = $clusterNodesAddresses.Split()
+    } else {
+        $nodesAddresses = @()
     }
 
-    return (Get-JujuRelationContext -Relation "peer" -RequiredContext $required)
-}
-
-function Get-IsNodeInCluster {
-    if(!(Get-IsASFClusterInstalled)) {
-        Write-JujuWarning "Azure Service Fabric cluster is not created yet."
-        return $false
-    }
-
-    $peerCtxt = Get-PeerContext
-    if(!$peerCtxt.Count) {
-        Write-JujuWarning "Peer context is not ready yet"
-        return $false
-    }
-
-    # NOTE(ibalutoiu):
-    # If DeploymentComponents is not added in PATH, the Azure Service Provider
-    # PowerShell cmdlets complain because they can't find the 'FabricCommon.dll'
-    $env:PATH += ";$ASF_PKG_DIR\DeploymentComponents"
-    Import-Module "$ASF_PKG_DIR\DeploymentComponents\ServiceFabric.psd1" | Out-Null
-
-    $cfgCtxt = Get-CharmConfigContext
-    $connectionEndpoint = "{0}:{1}" -f @($peerCtxt['private-address'], $cfgCtxt['client_connection_endpoint_port'])
-    Connect-ServiceFabricCluster -ConnectionEndpoint $connectionEndpoint | Out-Null
-
-    $node = Get-ServiceFabricNode -NodeName $COMPUTERNAME -ErrorAction SilentlyContinue
-
-    return ($node -ne $null)
+    return $nodesAddresses
 }
 
 function New-ASFCluster {
-    # This is set only after the cluster is created
-    if(Get-IsASFClusterInstalled) {
+    [array]$clusterNodesAddresses = Get-ASFClusterNodesAddresses
+    if($clusterNodesAddresses.Count) {
         Write-JujuWarning "Azure Service Fabric cluster is already created"
 
-        Set-LeaderData -Settings @{'cluster-installed' = Get-JujuUnitPrivateIP}
+        Set-ASFClusterNodesAddresses
         return
     }
 
     [array]$peerUnits = Get-PeerUnits
     $cfgCtxt = Get-CharmConfigContext
-    if($peerUnits.Count -lt ($VALID_RELIABILITY_LEVELS[$cfgCtxt['reliability_level']] - 1)) {
+    if($peerUnits.Count -lt $VALID_RELIABILITY_LEVELS[$cfgCtxt['reliability_level']]) {
         $msg = "Minimum {0} units are needed for {1} reliability level" -f @($VALID_RELIABILITY_LEVELS[$cfgCtxt['reliability_level']], $cfgCtxt['reliability_level'])
+        Write-JujuWarning $msg
         Set-JujuStatus -Status "waiting" -Message $msg
         return
     }
 
-    $clusterConfig = Get-ASFJsonClusterConfig -ClusterSecurityType $cfgCtxt['security_type'] -PeerUnits $peerUnits
+    $clusterConfig = Get-ASFClusterConfig -ClusterSecurityType $cfgCtxt['security_type']
 
     $jsonConfigFile = Join-Path $ASF_HOME_DIR "ClusterConfig.json"
     $jsonClusterConfig = ConvertTo-Json -InputObject $clusterConfig -Depth 10
     Set-Content -Path $jsonConfigFile -Value $jsonClusterConfig
 
     Write-JujuWarning "Creating the Azure Service Fabric cluster"
+    New-ServiceFabricCluster -ClusterConfigurationFilePath $jsonConfigFile `
+                             -FabricRuntimePackagePath $ASF_RUNTIME_CAB_FILE_PATH `
+                             -ErrorAction Stop
+    Remove-Item -Path $jsonConfigFile -ErrorAction SilentlyContinue
 
-    $savedPath = $env:PATH
-    Start-ExternalCommand -ScriptBlock {
-        # NOTE(ibalutoiu):
-        # The following script to create the Service Fabric Cluster from the package
-        # resets the path. Thus we save the path before calling it and restore after
-        # the call was finished.
-        & $ASF_PKG_DIR\CreateServiceFabricCluster.ps1 -ClusterConfigFilePath $jsonConfigFile -AcceptEULA
-    }
-    $env:PATH = $savedPath
+    # Set 'cluster-nodes-addresses' to leader only for the moment.
+    Set-LeaderData -Settings @{'cluster-nodes-addresses' = Get-JujuUnitPrivateIP}
 
-    Remove-Item -Path $jsonConfigFile
-
-    Set-LeaderData -Settings @{'cluster-installed' = Get-JujuUnitPrivateIP}
-}
-
-function Join-ASFCluster {
-    if(!(Get-IsASFClusterInstalled)) {
-        Write-JujuWarning "Azure Service Fabric cluster is not created yet"
-        return
-    }
-
-    if(Get-IsNodeInCluster) {
-        Write-JujuWarning "Current node is already in the Service Fabric cluster"
-
-        Set-JujuStatus -Status "active" -Message "Unit is ready"
-        return
-    }
-
-    $peerCtxt = Get-PeerContext
-    if(!$peerCtxt.Count) {
-        Write-JujuWarning "Peer context is not ready yet"
-        return
-    }
-
-    $cfgCtxt = Get-CharmConfigContext
-    $privateIP = Get-JujuUnitPrivateIP
-    $jujuFD = "fd:/{0}" -f @($cfgCtxt['fault_domain_name'])
-    $connectionEndpoint = "{0}:{1}" -f @($peerCtxt['private-address'], $cfgCtxt['client_connection_endpoint_port'])
-
-    Write-JujuWarning "Adding node $COMPUTERNAME to the Azure Service Fabric cluster"
-
-    $savedPath = $env:PATH
-    Start-ExternalCommand {
-        & $ASF_PKG_DIR\AddNode.ps1 -NodeName $COMPUTERNAME -NodeType $cfgCtxt['node_type_name'] -NodeIPAddressorFQDN $privateIP `
-                                   -UpgradeDomain $cfgCtxt['upgrade_domain_name'] -FaultDomain $jujuFD `
-                                   -ExistingClientConnectionEndpoint $connectionEndpoint -AcceptEULA
-    }
-    $env:PATH = $savedPath
+    Set-ASFClusterNodesAddresses
 
     Set-JujuStatus -Status "active" -Message "Unit is ready"
 }
 
+function Join-ASFCluster {
+    [array]$clusterNodesAddresses = Get-ASFClusterNodesAddresses
+    if(!$clusterNodesAddresses.Count) {
+        Write-JujuWarning "Azure Service Fabric cluster is not created yet"
+        return
+    }
+
+    $params = @{
+        'ErrorAction' = 'Stop'
+    }
+    $cfgCtxt = Get-CharmConfigContext
+    if($cfgCtxt['security_type'] -eq $WINDOWS_SECURITY_TYPE) {
+        $params['WindowsCredential'] = $true
+    }
+
+    foreach($address in $clusterNodesAddresses) {
+        Write-JujuWarning "Trying to establish connection to cluster node address: $address"
+        $params['ConnectionEndpoint'] = "{0}:{1}" -f @($address, $cfgCtxt['client_connection_endpoint_port'])
+        try {
+            Connect-ServiceFabricCluster @params | Out-Null
+        } catch {
+            Write-JujuWarning "Failed to establish connection to cluster node address: $address"
+            $params['ConnectionEndpoint'] = $null
+            continue
+        }
+        # Successfully created a cluster connection
+        break
+    }
+
+    if(!$params['ConnectionEndpoint']) {
+        Throw "Failed to create connection to any of the cluster nodes."
+    }
+
+    $node = Get-ServiceFabricNode -NodeName $COMPUTERNAME -ErrorAction SilentlyContinue
+    if($node) {
+        Write-JujuWarning "Current node is already in the Service Fabric cluster"
+        Set-JujuStatus -Status "active" -Message "Unit is ready"
+        return
+    }
+
+    Write-JujuWarning "Adding node $COMPUTERNAME to the Azure Service Fabric cluster"
+
+    if($cfgCtxt['security_type'] -eq $WINDOWS_SECURITY_TYPE) {
+        $adCtxt = Get-ActiveDirectoryContext 
+        $nodeAddress = "{0}.{1}" -f @($COMPUTERNAME, $adCtxt['domainName'])
+    } else {
+        $nodeAddress = Get-JujuUnitPrivateIP
+    }
+    $jujuFD = "fd:/{0}" -f @($cfgCtxt['fault_domain_name'])
+    Add-ServiceFabricNode -NodeName $COMPUTERNAME -NodeType $cfgCtxt['node_type_name'] `
+                          -IpAddressOrFQDN $nodeAddress -UpgradeDomain $cfgCtxt['upgrade_domain_name'] `
+                          -FaultDomain $jujuFD -FabricRuntimePackagePath $ASF_RUNTIME_CAB_FILE_PATH -Verbose `
+                          -ErrorAction Stop
+
+    $rids = Get-JujuRelationIds -Relation 'peer'
+    foreach($rid in $rids) {
+        Set-JujuRelation -RelationId $rid -Settings @{'cluster-joined' = $true}
+    }
+
+    Set-JujuStatus -Status "active" -Message "Unit is ready"
+}
+
+function Remove-ASFClusterNode {
+    <#
+    .SYNOPSIS
+    Removes the current node from the cluster
+    #>
+
+    [array]$clusterNodesAddresses = Get-ASFClusterNodesAddresses
+    if(!$clusterNodesAddresses.Count) {
+        Write-JujuWarning "Azure Service Fabric cluster is not created yet"
+        return
+    }
+
+    # Remove the current node from the list of addresses as we don't want
+    # to create a connection to the cluster node that we want to remove.
+    $privateIP = Get-JujuUnitPrivateIP
+    $clusterNodesAddresses = $clusterNodesAddresses | Where-Object { $_ -ne $privateIP }
+
+    Write-JujuWarning "Removing $COMPUTERNAME from the Azure Service Fabric cluster"
+
+    $params = @{
+        'ErrorAction' = 'Stop'
+    }
+    $cfgCtxt = Get-CharmConfigContext
+    if($cfgCtxt['security_type'] -eq $WINDOWS_SECURITY_TYPE) {
+        $params['WindowsCredential'] = $true
+    }
+
+    foreach($address in $clusterNodesAddresses) {
+        Write-JujuWarning "Trying to establish connection to cluster node address: $address"
+        $params['ConnectionEndpoint'] = "{0}:{1}" -f @($address, $cfgCtxt['client_connection_endpoint_port'])
+        try {
+            Connect-ServiceFabricCluster @params | Out-Null
+        } catch {
+            Write-JujuWarning "Failed to establish connection to cluster node address: $address"
+            $params['ConnectionEndpoint'] = $null
+            continue
+        }
+        # Successfully created a cluster connection
+        break
+    }
+
+    if(!$params['ConnectionEndpoint']) {
+        Throw "Failed to create connection to any of the cluster nodes."
+    }
+
+    # Removes the current node from the cluster
+    Remove-ServiceFabricNode -Verbose -ErrorAction Stop
+}
+
 function New-ASFLocalAdministrator {
     $leaderData = Get-LeaderData
-    if(!$leaderData['charm-user-name'] -or !$leaderData['charm-user-password']) {
+    $userName = $leaderData['charm-user-name']
+    $password = $leaderData['charm-user-password']
+
+    if(!$userName -or !$password) {
         if(!(Confirm-Leader)) {
             Write-JujuWarning "Leader unit didn't set the charm user credentials"
             return
@@ -498,16 +689,12 @@ function New-ASFLocalAdministrator {
             'charm-user-name' = $userName
             'charm-user-password' = $password
         }
-    } else {
-        $userName = $leaderData['charm-user-name']
-        $password = $leaderData['charm-user-password']
     }
 
     Add-WindowsUser -Username $userName -Password $password `
-                    -Fullname $CHARM_USER_FULL_NAME -Description $CHARM_USER_DESCRIPTION
+                    -Fullname $LOCAL_USER_FULL_NAME -Description $LOCAL_USER_DESCRIPTION
 
-    $administratorsGroupSID = "S-1-5-32-544"
-    Add-UserToLocalGroup -Username $userName -GroupSID $administratorsGroupSID
+    Add-UserToLocalGroup -Username $userName -GroupSID $ADMINISTRATORS_GROUP_SID
     Grant-Privilege -User $userName -Grant "SeServiceLogonRight"
 }
 
@@ -542,41 +729,81 @@ function Invoke-InstallHook {
 }
 
 function Invoke-StopHook {
-    if(!(Get-IsASFClusterInstalled)) {
-        Write-JujuWarning "Azure Service Fabric cluster is not created yet"
+    $asfUserCreds = Get-ASFCredential
+    if(!$asfUserCreds) {
+        Write-JujuWarning "ASF user credentials are not ready yet"
         return
     }
 
-    $peerCtxt = Get-PeerContext
-    if(!$peerCtxt.Count) {
-        Write-JujuWarning "Peer context is not ready yet"
-        return
+    $scriptBlock = {
+        $ErrorActionPreference = 'Stop'
+
+        Import-Module JujuLogging
+
+        try {
+            Import-Module ASFHooks
+
+            Remove-ASFClusterNode
+        } catch {
+            Write-HookTracebackToLog $_
+            exit 1
+        }
     }
-
-    Write-JujuWarning "Removing $COMPUTERNAME from the Azure Service Fabric cluster"
-
-    $env:PATH += ";$ASF_PKG_DIR\DeploymentComponents"
-    Import-Module "$ASF_PKG_DIR\DeploymentComponents\ServiceFabric.psd1"
-
-    $cfgCtxt = Get-CharmConfigContext
-    $connectionEndpoint = "{0}:{1}" -f @($peerCtxt['private-address'], $cfgCtxt['client_connection_endpoint_port'])
-    Connect-ServiceFabricCluster -ConnectionEndpoint $connectionEndpoint
-
-    $savedPath = $env:PATH
-    Start-ExternalCommand {
-        & $ASF_PKG_DIR\RemoveNode.ps1 -ExistingClientConnectionEndpoint $connectionEndpoint
+    $exitCode = Start-ProcessAsUser -Command "$PShome\powershell.exe" -Arguments @("-Command", $scriptBlock) `
+                                    -Credential $asfUserCreds -LoadUserProfile $false
+    if($exitCode) {
+        Throw "Failed to run stop hook. Exit code: $exitCode"
     }
-    $env:PATH = $savedPath
+}
+
+function Invoke-UpdateStatusHook {
+    # TODO(ibalutoiu):
+    # Remove all the cluster nodes that were forcedly removed.
+    # Iterate over all the Juju units and all the cluster nodes, and remove the
+    # cluster nodes that Juju is not aware of.
 }
 
 function Invoke-LeaderSettingsChangedHook {
     New-ASFLocalAdministrator
 
-    # Add the current node to the cluster if not yet added.
-    Join-ASFCluster
+    $asfUserCreds = Get-ASFCredential
+    if(!$asfUserCreds) {
+        Write-JujuWarning "ASF user credentials are not ready yet"
+        return
+    }
+
+    $scriptBlock = {
+        $ErrorActionPreference = 'Stop'
+
+        Import-Module JujuLogging
+
+        try {
+            Import-Module ASFHooks
+
+            # Add the current node to the cluster if not yet added.
+            Join-ASFCluster
+        } catch {
+            Write-HookTracebackToLog $_
+            exit 1
+        }
+    }
+    $exitCode = Start-ProcessAsUser -Command "$PShome\powershell.exe" -Arguments @("-Command", $scriptBlock) `
+                                    -Credential $asfUserCreds -LoadUserProfile $false
+    if($exitCode) {
+        Throw "Failed to run leader-settings-changed hook. Exit code: $exitCode"
+    }
 }
 
 function Invoke-PeerRelationJoinedHook {
+    $cfgCtxt = Get-CharmConfigContext
+    $domainJoined = Start-JoinDomain
+    if(($cfgCtxt['security_type'] -eq $WINDOWS_SECURITY_TYPE) -and !$domainJoined) {
+        # When cluster security type is set to Windows, ad-join relation is mandatory.
+        Write-JujuWarning "Cluster security type is set to Windows. AD context is not ready yet"
+        Set-JujuStatus -Status 'blocked' -Message 'Incomplete relation: ad-join'
+        return
+    }
+
     $relationSettings = @{
         'computer-name' = $COMPUTERNAME
     }
@@ -588,30 +815,85 @@ function Invoke-PeerRelationJoinedHook {
 }
 
 function Invoke-PeerRelationChangedHook {
-    if(Confirm-Leader) {
-        $scriptBlock = {
-            Import-Module ASFHooks
-            New-ASFCluster
-        }
-        $exitCode = Start-ProcessAsUser -Command "$PShome\powershell.exe" -Arguments @("-Command", $scriptBlock) `
-                                        -Credential (Get-ASFUserCredential) -LoadUserProfile $false
-        if($exitCode) {
-            Throw "Failed to create the Azure Service Fabric cluster. Exit code: $exitCode"
-        }
+    $asfUserCreds = Get-ASFCredential
+    if(!$asfUserCreds) {
+        Write-JujuWarning "ASF user credentials are not ready yet"
+        return
     }
 
-    # Add the current node to the cluster if not yet added.
-    Join-ASFCluster
+    $scriptBlock = {
+        $ErrorActionPreference = 'Stop'
+
+        Import-Module JujuLogging
+
+        try {
+            Import-Module ASFHooks
+            Import-Module JujuHooks
+
+            if(Confirm-Leader) {
+                New-ASFCluster
+            }
+            # Add the current node to the cluster if not yet added.
+            Join-ASFCluster
+        } catch {
+            Write-HookTracebackToLog $_
+            exit 1
+        }
+    }
+    $exitCode = Start-ProcessAsUser -Command "$PShome\powershell.exe" -Arguments @("-Command", $scriptBlock) `
+                                    -Credential $asfUserCreds -LoadUserProfile $false
+    if($exitCode) {
+        Throw "Failed to run peer-relation-changed hook. Exit code: $exitCode"
+    }
 }
 
-function Invoke-WebsiteRelationJoinedHook {
-    $cfgCtxt = Get-CharmConfigContext
-    $relationSettings = @{
-        "hostname" = Get-JujuUnitPrivateIP
-        "port" = $cfgCtxt['http_gateway_endpoint_port']
+function Invoke-ADJoinRelationJoinedHook {
+    $settings = @{
+        'computername' = $COMPUTERNAME
     }
 
-    $rids = Get-JujuRelationIds 'website'
+    $adUsers = @{
+        $ASF_AD_USER_NAME = @("Users")
+        $ASF_AD_ADMIN_NAME = @("Users", "Domain Admins")
+    }
+    $settings['users'] = Get-MarshaledObject $adUsers
+    $settings['computer-group'] = $ASF_AD_GROUP_NAME
+
+    $rids = Get-JujuRelationIds -Relation "ad-join"
+    foreach ($rid in $rids) {
+        Set-JujuRelation -RelationId $rid -Settings $settings
+    }
+}
+
+function Invoke-ADJoinRelationChangedHook {
+    if(Start-JoinDomain) {
+        Invoke-PeerRelationJoinedHook
+        Invoke-PeerRelationChangedHook
+    }
+}
+
+function Invoke-ReverseProxyJoinedHook {
+    $cfgCtxt = Get-CharmConfigContext
+    $apiPort = $cfgCtxt['client_connection_endpoint_port']
+    $guiPort = $cfgCtxt['http_gateway_endpoint_port']
+    $privateIP = Get-JujuUnitPrivateIP
+
+    $relationSettings = @{
+        'services' = "
+            - { service_name: AzureServiceFabricGUI,
+                service_host: 0.0.0.0,
+                service_port: '$guiPort',
+                service_options: [balance leastconn, cookie SRVNAME insert],
+                servers: [[$COMPUTERNAME, $privateIP, $guiPort, 'maxconn 100 cookie S{i} check']] }
+            - { service_name: AzureServiceFabricAPI,
+                service_host: 0.0.0.0,
+                service_port: '$apiPort',
+                service_options: [balance leastconn, cookie SRVNAME insert],
+                servers: [[$COMPUTERNAME, $privateIP, $apiPort, 'maxconn 100 cookie S{i} check']] }
+        "
+    }
+
+    $rids = Get-JujuRelationIds 'reverseproxy'
     foreach ($rid in $rids) {
         Set-JujuRelation -Settings $relationSettings -RelationId $rid
     }

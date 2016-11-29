@@ -9,7 +9,7 @@ options:
     description: |
       The type of the cluster security. Supported types by the charm are:
       - 'Unsecure', the cluster is not secured at all;
-      - 'Windows', for an Azure Active Directory-based security;
+      - 'Windows', for an Active Directory based security;
       - 'X509', for a certificate-based security.
   reliability-level:
     type: string

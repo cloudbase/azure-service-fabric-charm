@@ -20,8 +20,11 @@ resources:
     description: Azure Service Fabric standalone zip package
 subordinate: false
 provides:
-  website:
+  reverseproxy:
     interface: http
+requires:
+  ad-join:
+    interface: ad-join
 peers:
   peer:
     interface: asf-peer
