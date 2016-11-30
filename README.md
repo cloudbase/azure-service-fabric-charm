@@ -9,9 +9,9 @@ Plan your cluster configuration before deploying the charm as the current releas
 
 Supported deployment scenarios at the moment are:
 
-- Unsecured cluster node-to-node and client-to-node. This is the default behavior. In this way the charm doesn't have any relation and it can be deployed standalone, but this is not recommended in the production due to security concerns.
+- Unsecured cluster node-to-node and client-to-node. This is the default behavior and the charm doesn't have any relation with other charms, but this is not recommended in the production due to security concerns.
 
-- Secured using Active Directory Windows credentials. This requires a relation with the [active directory charm](https://jujucharms.com/u/cloudbaseit/active-directory). This can be achieved by deploying the charm with `security-type` config option set to `Windows`.
+- Secured using Active Directory Windows credentials. This requires a relation with the [active directory charm](https://jujucharms.com/u/cloudbaseit/active-directory) and it can be achieved by deploying the current charm with `security-type` config option set to `Windows`.
 
 For both scenarios make sure you properly adjust the `reliability-level` config option as this dictates the minimum number of units necessary to form the cluster. By default the reliability level is set to `Bronze` and it requires at least three nodes to form the cluster. More info about reliability levels can be found at the following [url](https://docs.microsoft.com/en-us/azure/service-fabric/service-fabric-cluster-manifest#reliability).
 
@@ -23,24 +23,51 @@ The charm has two dependencies. Whenever someone deploys the charm, these needs 
 
 Make sure you download the dependencies before you deploy the charm:
 
-- Full version of .NET framework version 4.5.1 or higher. This can be obtained from the following [download url](https://www.microsoft.com/en-us/download/details.aspx?id=40779)
+- Full version of .NET framework version 4.5.1 or higher. This can be obtained from the following [download url](https://www.microsoft.com/en-us/download/details.aspx?id=40779);
 - Service Fabric standalone zip package. This can be download from the Microsoft website at the following [url](https://docs.microsoft.com/en-us/azure/service-fabric/service-fabric-cluster-creation-for-windows-server), section *Download the Service Fabric standalone package*.
 
-When you have your resources ready, you can deploy the charm. The following commands will deploy a cluster using AD Windows security type, `Bronze` reliability level and HAProxy load balancer in order to do a reverse proxy for the API and GUI port.
+When you have your resources ready, you can deploy the charm. 
 
-    juju deploy  cs:~cloudbaseit/azure-service-fabric-1 --resource dotnet-installer="<dot_net_framework_installed_path>" \
-                                                        --resource asf-zip-package="<service_fabric_zip_package_path>" \
-                                                        --num-units 3
+## Deployment Steps
+
+The following commands will deploy a cluster using AD Windows security type, `Bronze` reliability level and HAProxy load balancer in order to do a reverse proxy for the API and GUI endpoints.
+
+    juju deploy cs:~cloudbaseit/azure-service-fabric-7 --num-units 3 --series win2012r2 \
+        --resource dotnet-installer="<dot_net_framework_installed_path>" \
+        --resource asf-zip-package="<service_fabric_zip_package_path>"
+
     juju config azure-service-fabric security-type=Windows \
                                      change-hostname=True
-    juju deploy cs:~cloudbaseit/active-directory
+
+    juju deploy cs:~cloudbaseit/active-directory --series win2012r2
+
     juju config active-directory administrator-password="<secure_password>" \
-                                 safe-mode-password: "<secure_password>" \
-                                 domain-user: "jujuadmin" \
-                                 domain-user-password: "<secure_password>" \
-                                 domain-name: "<fully_qualified_domain_name>" \
-                                 change-hostname: True
-    juju deploy cs:haproxy
+                                 safe-mode-password="<secure_password>" \
+                                 domain-user="jujuadmin" \
+                                 domain-user-password="<secure_password>" \
+                                 domain-name="<fully_qualified_domain_name>" \
+                                 change-hostname=True
+
+    juju deploy cs:haproxy --series xenial
+
+    juju add-relation azure-service-fabric active-directory
+    juju add-relation azure-service-fabric haproxy
+
     juju expose haproxy
 
-Once the deployment finishes, find the public address of HAProxy unit and you can access the web portal the the following url: `http://<haproxy_public_address>:19080`. And also if you'd like to query the API, this can be done at the following endpoint: `<haproxy_public_address>:19000`.
+Once the deployment finishes, find the public address of HAProxy unit and you can access the web portal the the following url: `http://<haproxy_public_address>:19080`. Also if you'd like to query the API, this can be done at the following endpoint: `<haproxy_public_address>:19000`.
+
+To access either the GUI or the API, you need the AD credentials. The charm requests two users from the Active Directory charm and both are granted with cluster access. One of the users named `asf-admin` has cluster administrative privileges and the other one named `asf-user` is just a normal user with read-only access to the cluster.
+
+Passwords for these domain users are randomly generated by the AD charm. After the deployment is finished, you can find their passwords by running the `get-ad-user-credentials` Juju action:
+
+    ACTION_ID=$(juju run-action <any_deployed_service_fabric_unit> get-ad-user-credentials | awk '{print $5}')
+    juju show-action-output $ACTION_ID
+
+## Scale up/down
+
+For scaling up your cluster, adding another node to your cluster is just as easy as typing the following command:
+
+    juju add-unit azure-service-fabric
+
+Unfortunately, the current version of the charm doesn't support scaling down, but this will be added in the upcoming release of the charm.
