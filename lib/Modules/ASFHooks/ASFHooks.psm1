@@ -130,23 +130,6 @@ function Install-DotNetFramework {
     Returns a boolean to indicate if a reboot is needed or not
     #>
 
-    # Release codes for all the supported .NET frameworks (4.5.1 or higher)
-    $supportedNetFrameworkReleases = @(
-        378675, # .NET Framework 4.5.1 installed with Windows 8.1 or Windows Server 2012 R2
-        378758, # .NET Framework 4.5.1 installed on Windows 8, Windows 7 SP1, or Windows Vista SP2
-        379893, # .NET Framework 4.5.2
-        393295, # .NET Framework 4.6 on Windows 10
-        393297, # .NET Framework 4.6 on other OS versions
-        394254, # .NET Framework 4.6.1 on Windows 10 November Update
-        394271, # .NET Framework 4.6.1 on all other OS versions
-        394802, # .NET Framework 4.6.2 on Windows 10 Anniversary Update
-        394806  # .NET Framework 4.6.2 on all other OS versions
-    )
-    $item = Get-ItemProperty -Path "HKLM:\Software\Microsoft\NET Framework Setup\NDP\v4\Full" -ErrorAction SilentlyContinue
-    if($item -and ($item.Release -in $supportedNetFrameworkReleases)) {
-        Write-JujuWarning "Supported .NET framework version by the charm already installed"
-        return
-    }
     $installerPath = Get-DotNetFrameworkInstaller
     Write-JujuWarning "Installing .NET framework"
     $p = Start-Process -Wait -PassThru -FilePath $installerPath `
