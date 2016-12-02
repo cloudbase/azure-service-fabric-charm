@@ -32,7 +32,7 @@ When you have your resources ready, you can deploy the charm.
 
 The following commands will deploy a cluster using AD Windows security type, `Bronze` reliability level and HAProxy load balancer in order to do a reverse proxy for the API and GUI endpoints.
 
-    juju deploy cs:~cloudbaseit/azure-service-fabric-7 --num-units 3 --series win2012r2 \
+    juju deploy cs:~cloudbaseit/azure-service-fabric-8 --num-units 3 --series win2012r2 \
         --resource dotnet-installer="<dot_net_framework_installed_path>" \
         --resource asf-zip-package="<service_fabric_zip_package_path>"
 

@@ -780,12 +780,12 @@ function Invoke-ReverseProxyJoinedHook {
             - { service_name: AzureServiceFabricGUI,
                 service_host: 0.0.0.0,
                 service_port: '$guiPort',
-                service_options: [balance leastconn, cookie SRVNAME insert],
+                service_options: [mode tcp, balance leastconn, cookie SRVNAME insert],
                 servers: [[$COMPUTERNAME, $privateIP, $guiPort, 'maxconn 100 cookie S{i} check']] }
             - { service_name: AzureServiceFabricAPI,
                 service_host: 0.0.0.0,
                 service_port: '$apiPort',
-                service_options: [balance leastconn, cookie SRVNAME insert],
+                service_options: [mode tcp, balance leastconn, cookie SRVNAME insert],
                 servers: [[$COMPUTERNAME, $privateIP, $apiPort, 'maxconn 100 cookie S{i} check']] }
         "
     }
