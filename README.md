@@ -24,16 +24,18 @@ The charm has two dependencies. Whenever someone deploys the charm, these needs 
 Make sure you download the dependencies before you deploy the charm:
 
 - Full version of .NET framework version 4.5.1 or higher. This can be obtained from the following [download url](https://www.microsoft.com/en-us/download/details.aspx?id=40779);
-- Service Fabric standalone zip package. This can be download from the Microsoft website at the following [url](https://docs.microsoft.com/en-us/azure/service-fabric/service-fabric-cluster-creation-for-windows-server), section *Download the Service Fabric standalone package*.
+- Service Fabric standalone zip package. This can be downloaded from the Microsoft website at the following [url](https://docs.microsoft.com/en-us/azure/service-fabric/service-fabric-cluster-creation-for-windows-server), section *Download the Service Fabric standalone package*.
 
-When you have your resources ready, you can deploy the charm. 
+When you have your resources ready, you can deploy the charm.
+
+**NOTE**: The default Juju resources from charm store are just some dummy files and they are the not real resources. If the user doesn't provide the real resources at deploy time, the charm will not work.
 
 ## Deployment Steps
 
 The following commands will deploy a cluster using AD Windows security type, `Bronze` reliability level and HAProxy load balancer in order to do a reverse proxy for the API and GUI endpoints.
 
-    juju deploy cs:~cloudbaseit/azure-service-fabric-8 --num-units 3 --series win2012r2 \
-        --resource dotnet-installer="<dot_net_framework_installed_path>" \
+    juju deploy cs:~cloudbaseit/azure-service-fabric --num-units 3 --series win2012r2 \
+        --resource dotnet-installer="<dot_net_framework_installer_path>" \
         --resource asf-zip-package="<service_fabric_zip_package_path>"
 
     juju config azure-service-fabric security-type=Windows \
