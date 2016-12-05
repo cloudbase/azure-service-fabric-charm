@@ -67,6 +67,11 @@ options:
     default: 19080
     description: |
       The port used by the Service Fabric Explorer to connect to the cluster.
+  reverse-proxy-endpoint-port:
+    type: int
+    default: 19081
+    description: |
+      The port used by the built-in Service Fabric reverse proxy.
   ephemeral-start-port:
     type: int
     default: 20606

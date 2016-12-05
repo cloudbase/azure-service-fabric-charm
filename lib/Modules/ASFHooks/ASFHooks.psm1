@@ -35,6 +35,7 @@ $DEFAULT_FABRIC_DATA_ROOT = Join-Path $ASF_HOME_DIR "FabricDataRoot"
 $DEFAULT_DIAGNOSTICS_STORE = Join-Path $ASF_HOME_DIR "DiagnosticsStore"
 $ADMINISTRATORS_GROUP_SID = "S-1-5-32-544"
 $COMPUTERNAME = [System.Net.Dns]::GetHostName()
+$FIREWALL_RULE_PREFIX = "ASF-Juju-Charm"
 # Mapping between reliability levels and the minimum number of primary nodes
 # required to achieve it.
 $VALID_RELIABILITY_LEVELS = @{
@@ -71,6 +72,7 @@ function Get-CharmConfigContext {
         'lease-driver-endpoint-port',
         'service-connection-endpoint-port',
         'http-gateway-endpoint-port',
+        'reverse-proxy-endpoint-port',
         'ephemeral-start-port',
         'ephemeral-end-port',
         'application-start-port',
@@ -236,6 +238,7 @@ function Open-CharmPorts {
     $cfgCtxt = Get-CharmConfigContext
     Open-JujuPort -Port ("{0}/tcp" -f @($cfgCtxt['client_connection_endpoint_port']))
     Open-JujuPort -Port ("{0}/tcp" -f @($cfgCtxt['http_gateway_endpoint_port']))
+    Open-JujuPort -Port ("{0}/tcp" -f @($cfgCtxt['reverse_proxy_endpoint_port']))
     Open-JujuPort -Port ("{0}-{1}/tcp" -f @($cfgCtxt['application_start_port'], $cfgCtxt['application_end_port']))
 }
 
@@ -330,6 +333,7 @@ function Get-ASFBaseClusterConfig {
                     "leaseDriverEndpointPort" = $cfgCtxt['lease_driver_endpoint_port']
                     "serviceConnectionEndpointPort" = $cfgCtxt['service_connection_endpoint_port']
                     "httpGatewayEndpointPort" = $cfgCtxt['http_gateway_endpoint_port']
+                    "reverseProxyEndpointPort" = $cfgCtxt['reverse_proxy_endpoint_port']
                     "applicationPorts" = @{
                         "startPort" = $cfgCtxt['application_start_port']
                         "endPort" = $cfgCtxt['application_end_port']
@@ -616,6 +620,100 @@ function New-ASFLocalAdministrator {
     Grant-Privilege -User $userName -Grant "SeServiceLogonRight"
 }
 
+function Get-ApplicationPorts {
+    <#
+    .SYNOPSIS
+    Returns a list with the currently deployed application endpoints ports
+    #>
+
+    [array]$clusterNodesAddresses = Get-ASFClusterNodesAddresses
+    if(!$clusterNodesAddresses.Count) {
+        Write-JujuWarning "Azure Service Fabric cluster is not created yet"
+        return
+    }
+    $params = @{'ErrorAction' = 'Stop'}
+    $cfgCtxt = Get-CharmConfigContext
+    if($cfgCtxt['security_type'] -eq $WINDOWS_SECURITY_TYPE) {
+        $params['WindowsCredential'] = $true
+    }
+    foreach($address in $clusterNodesAddresses) {
+        Write-JujuWarning "Trying to establish connection to cluster node address: $address"
+        $params['ConnectionEndpoint'] = "{0}:{1}" -f @($address, $cfgCtxt['client_connection_endpoint_port'])
+        try {
+            Connect-ServiceFabricCluster @params | Out-Null
+        } catch {
+            Write-JujuWarning "Failed to establish connection to cluster node address: $address"
+            $params['ConnectionEndpoint'] = $null
+            continue
+        }
+        # Successfully created a cluster connection
+        break
+    }
+    if(!$params['ConnectionEndpoint']) {
+        Throw "Failed to create connection to any of the cluster nodes."
+    }
+
+    # Get all the replica instance that expose endpoints
+    [array]$replicas = Get-ServiceFabricApplication | Get-ServiceFabricService | `
+                       Get-ServiceFabricPartition | Get-ServiceFabricReplica | Where-Object { $_.ReplicaAddress }
+    $endpointsList = [System.Collections.Generic.List[String]](New-Object "System.Collections.Generic.List[String]")
+    foreach($address in $replicas.ReplicaAddress) {
+        # Sanitize the address before converting it from YAML. It removes
+        # all the escape '\' characters.
+        $address = $address -replace '\\', ''
+        $addressObj = ConvertFrom-Yaml -Yaml $address
+        [array]$endpoints = $addressObj['Endpoints'].Values
+        $endpoints | ForEach-Object { $endpointsList.Add($_) }
+    }
+
+    $ports = [System.Collections.Generic.List[String]](New-Object "System.Collections.Generic.List[String]")
+    foreach($endpoint in $endpointsList) {
+        $endpoint = $endpoint.ToLower()
+        # Check if the endpoint is a HTTP(s) endpoint
+        if($endpoint.StartsWith('http://') -or $endpoint.StartsWith('https://')) {
+            $uri = [Uri]$endpoint
+            if($uri.Port -notin $ports) {
+                $ports.Add($uri.Port)
+            }
+            continue
+        }
+        # This matches all the normal endpoints of the form: "<address>:<port>+<uuid>-<int64>"
+        $uuidRegex = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        $match = Select-String -Pattern "^(.*):([1-9][0-9]*)\+($uuidRegex)-(.*)" -InputObject $endpoint
+        if($match) {
+            $port = $match.Matches.Groups[2].Value
+            if($port -notin $ports) {
+                $ports.Add($port)
+            }
+        }
+    }
+
+    return $ports
+}
+
+function Open-WindowsFirewallPorts {
+    <#
+    .SYNOPSIS
+    Opens all the local Windows firewall ports for the applications that have
+    endpoint ports not included in the Service Fabric dynamic applications
+    port range.
+    #>
+
+    # Delete old Windows firewall ports created by the charm
+    [array]$rules = Get-NetFirewallRule -Name "${FIREWALL_RULE_PREFIX}-*"
+    if($rules.Count) {
+        $rules.Name | ForEach-Object { Remove-NetFirewallRule -Name $_ }
+    }
+
+    [array]$appPorts = Get-ApplicationPorts
+    foreach($appPort in $appPorts) {
+        $firewallRuleName = "${FIREWALL_RULE_PREFIX}-TCP-${appPort}"
+        New-NetFirewallRule -Name $firewallRuleName -DisplayName $firewallRuleName `
+                            -Enabled True -Profile Any -Direction Inbound `
+                            -Action Allow -Protocol TCP -LocalPort $appPort -Confirm:$false | Out-Null
+    }
+}
+
 function Invoke-InstallHook {
     try {
         Set-MpPreference -DisableRealtimeMonitoring $true
@@ -774,6 +872,7 @@ function Invoke-ReverseProxyJoinedHook {
     $cfgCtxt = Get-CharmConfigContext
     $apiPort = $cfgCtxt['client_connection_endpoint_port']
     $guiPort = $cfgCtxt['http_gateway_endpoint_port']
+    $reverseProxyPort = $cfgCtxt['reverse_proxy_endpoint_port']
     $privateIP = Get-JujuUnitPrivateIP
     $relationSettings = @{
         'services' = "
@@ -787,6 +886,11 @@ function Invoke-ReverseProxyJoinedHook {
                 service_port: '$apiPort',
                 service_options: [mode tcp, balance leastconn, cookie SRVNAME insert],
                 servers: [[$COMPUTERNAME, $privateIP, $apiPort, 'maxconn 100 cookie S{i} check']] }
+            - { service_name: AzureServiceFabricReverseProxy,
+                service_host: 0.0.0.0,
+                service_port: '$reverseProxyPort',
+                service_options: [mode tcp, balance leastconn, cookie SRVNAME insert],
+                servers: [[$COMPUTERNAME, $privateIP, $reverseProxyPort, 'maxconn 100 cookie S{i} check']] }
         "
     }
     $rids = Get-JujuRelationIds 'reverseproxy'
